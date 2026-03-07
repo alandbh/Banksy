@@ -8,9 +8,9 @@ from typing import Any, Optional
 
 from banksy_cli.config import DEFAULT_GEMINI_MODEL
 
-PROMPT = """Analyze this image for sensitive information. Return JSON with:
+PROMPT = """Analyze this image for sensitive information. Be careful to not detect generic content. We are looking for specific types of sensitive data for brazilian citizens. Return JSON with:
 - faces: list of {bbox: [x,y,w,h], confidence} for each detected face
-- sensitive_text: list of {type: "cpf"|"phone"|"bank"|"cc"|"other", text: "...", bbox: [x,y,w,h], confidence} for sensitive text
+- sensitive_text: list of {type: "cpf"|"account"|"password"|"pin"|"cvv"|"credit_card_number"|"social_security_number"|"email"|"address"|"id_card"|"phone"|"bank"|"cc"|"other", text: "...", bbox: [x,y,w,h], confidence} for sensitive text
 - keyboard: {present: bool, bbox: [x,y,w,h] or null, confidence} if on-screen keyboard visible
 - input_field: {present: bool, bbox: [x,y,w,h] or null, confidence} if input field visible
 - typing_sensitive: true if user appears to be typing sensitive data (e.g. near input field with keyboard)

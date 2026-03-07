@@ -61,6 +61,12 @@ def _output_fps_callback(value: Optional[float]) -> Optional[float]:
     return value
 
 
+def _non_negative_int_callback(value: int) -> int:
+    if value < 0:
+        raise typer.BadParameter("Must be >= 0")
+    return value
+
+
 def _crf_callback(value: int) -> int:
     if value < 0 or value > 51:
         raise typer.BadParameter("Must be between 0 and 51")
@@ -133,6 +139,17 @@ def main(
         "--output-fps",
         callback=_output_fps_callback,
         help="Cap output FPS to speed up processing (e.g. 12 or 15)",
+    ),
+    auto_crop_content: bool = typer.Option(
+        False,
+        "--auto-crop-content",
+        help="Auto-crop black borders/content area before detection/redaction",
+    ),
+    crop_padding: int = typer.Option(
+        0,
+        "--crop-padding",
+        callback=_non_negative_int_callback,
+        help="Padding (pixels) around detected auto-crop box",
     ),
     use_gemini: bool = typer.Option(
         False,
@@ -266,6 +283,8 @@ def main(
         workers=workers,
         output_height=output_height,
         output_fps=output_fps,
+        auto_crop_content=auto_crop_content,
+        crop_padding=crop_padding,
         encode_preset=encode_preset,
         crf=crf,
     )

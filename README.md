@@ -51,6 +51,8 @@ banksy input.mp4 --face on --text on
 # Output options
 banksy input.mp4 --no-audio           # strip audio
 banksy input.mp4 --output-height 480  # downscale before processing/output
+banksy input.mp4 --auto-crop-content  # remove black borders/content margins
+banksy input.mp4 --auto-crop-content --crop-padding 8
 banksy input.mp4 --keep-temp          # keep intermediate frames
 banksy input.mp4 --json-report        # emit demo.redacted.json
 

@@ -20,9 +20,12 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
 ALLOWED_LABELS = {
     "face",
     "cpf",
+    "email",
+    "address",
     "phone",
     "cc",
     "bank",
+    "bank_account",
     "keyboard",
     "input_field",
     "input_field_text",
@@ -35,7 +38,7 @@ Analyze the full video and return ONLY valid JSON with this exact shape:
     {
       "start_sec": number,
       "end_sec": number,
-      "label": "face|cpf|phone|cc|bank|keyboard|input_field|input_field_text",
+      "label": "face|cpf|email|address|phone|cc|bank|bank_account|keyboard|input_field|input_field_text",
       "bbox_norm": [x, y, w, h],
       "confidence": number
     }

@@ -23,6 +23,7 @@ from banksy_cli.detect_text import detect_text
 from banksy_cli.gemini_video_client import analyze_video_file
 from banksy_cli.io_ffmpeg import (
     check_ffmpeg,
+    detect_content_crop,
     extract_all_frames,
     extract_frames,
     get_video_info,
@@ -455,10 +456,29 @@ def _event_bbox_to_pixels(
     out_h: int,
     src_w: int,
     src_h: int,
+    crop_box: Optional[tuple[int, int, int, int]] = None,
 ) -> list[int]:
     if len(bbox) < 4:
         return [0, 0, 0, 0]
     x, y, b3, b4 = bbox[0], bbox[1], bbox[2], bbox[3]
+
+    def _project_from_source_pixels(px: float, py: float, pw: float, ph: float) -> list[int]:
+        if crop_box is not None:
+            crop_x, crop_y, crop_w, crop_h = crop_box
+            x1 = max(0.0, px - crop_x)
+            y1 = max(0.0, py - crop_y)
+            x2 = min(float(crop_w), px + pw - crop_x)
+            y2 = min(float(crop_h), py + ph - crop_y)
+            if x2 <= x1 or y2 <= y1:
+                return [0, 0, 0, 0]
+            sx = out_w / float(max(1, crop_w))
+            sy = out_h / float(max(1, crop_h))
+            return [int(x1 * sx), int(y1 * sy), int((x2 - x1) * sx), int((y2 - y1) * sy)]
+
+        sx = out_w / float(max(1, src_w))
+        sy = out_h / float(max(1, src_h))
+        return [int(px * sx), int(py * sy), int(pw * sx), int(ph * sy)]
+
     # Preferred format from prompt: normalized 0..1.
     if max(abs(x), abs(y), abs(b3), abs(b4)) <= 1.5:
         # Heuristic: if it looks like x1,y1,x2,y2, convert to xywh.
@@ -468,11 +488,11 @@ def _event_bbox_to_pixels(
         else:
             w = b3
             h = b4
-        px = int(max(0.0, x) * out_w)
-        py = int(max(0.0, y) * out_h)
-        pw = int(max(0.0, w) * out_w)
-        ph = int(max(0.0, h) * out_h)
-        return [px, py, pw, ph]
+        src_px = max(0.0, x) * src_w
+        src_py = max(0.0, y) * src_h
+        src_pw = max(0.0, w) * src_w
+        src_ph = max(0.0, h) * src_h
+        return _project_from_source_pixels(src_px, src_py, src_pw, src_ph)
 
     # Fallback: treat as source-space pixels and rescale to output resolution.
     if b3 > x and b4 > y and (x + b3 > src_w * 1.01 or y + b4 > src_h * 1.01):
@@ -481,9 +501,7 @@ def _event_bbox_to_pixels(
     else:
         w = b3
         h = b4
-    sx = out_w / float(max(1, src_w))
-    sy = out_h / float(max(1, src_h))
-    return [int(x * sx), int(y * sy), int(w * sx), int(h * sy)]
+    return _project_from_source_pixels(x, y, w, h)
 
 
 def _build_frame_detections_from_events(
@@ -495,6 +513,7 @@ def _build_frame_detections_from_events(
     out_h: int,
     src_w: int,
     src_h: int,
+    crop_box: Optional[tuple[int, int, int, int]] = None,
 ) -> dict[int, list[dict]]:
     frame_detections: dict[int, list[dict]] = {}
     if total_frames <= 0 or fps <= 0:
@@ -519,6 +538,7 @@ def _build_frame_detections_from_events(
             out_h=out_h,
             src_w=src_w,
             src_h=src_h,
+            crop_box=crop_box,
         )
         expanded = _tune_gemini_event_bbox(label, pixel_bbox, out_w, out_h)
         if expanded[2] <= 0 or expanded[3] <= 0:
@@ -836,6 +856,8 @@ def _process_video(
     encode_preset: str = "medium",
     crf: int = 18,
     gemini_debug_json: Optional[Path] = None,
+    auto_crop_content: bool = False,
+    crop_padding: int = 0,
 ) -> None:
     """Process video: extract, detect, interpolate, redact, re-encode."""
     import tempfile
@@ -845,6 +867,14 @@ def _process_video(
     source_fps = info["fps"]
     fps = min(source_fps, output_fps) if output_fps is not None else source_fps
     sample_fps_eff = min(sample_fps, fps) if fps > 0 else sample_fps
+    crop_box: Optional[tuple[int, int, int, int]] = None
+    if auto_crop_content:
+        crop_box = detect_content_crop(input_path, padding_px=max(0, int(crop_padding)))
+        if crop_box is not None:
+            crop_x, crop_y, crop_w, crop_h = crop_box
+            _log_progress(f"Auto-crop enabled: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}")
+        else:
+            _log_progress("Auto-crop enabled but no stable content crop was detected; using full frame.")
 
     with tempfile.TemporaryDirectory(prefix="banksy_") as tmpdir:
         tmp = Path(tmpdir)
@@ -885,6 +915,7 @@ def _process_video(
                 sample_fps_eff,
                 max_frames,
                 output_height=output_height,
+                crop_box=crop_box,
             )
             if not analyze_frames:
                 raise RuntimeError("No frames extracted from video")
@@ -926,7 +957,15 @@ def _process_video(
 
         # Extract ALL frames at original fps for redaction
         _log_progress(f"4/6 Extracting frames for redaction (output_fps={fps:.2f})")
-        all_frame_paths = extract_all_frames(input_path, full_dir, fps, output_height=output_height)
+        if crop_box is not None:
+            _log_progress("Using cropped frame extraction for redaction timeline")
+        all_frame_paths = extract_all_frames(
+            input_path,
+            full_dir,
+            fps,
+            output_height=output_height,
+            crop_box=crop_box,
+        )
         total_extracted = len(all_frame_paths)
         _log_progress(f"Frames to redact: {total_extracted}")
 
@@ -953,6 +992,7 @@ def _process_video(
                     out_h=out_h,
                     src_w=int(info.get("width", out_w)),
                     src_h=int(info.get("height", out_h)),
+                    crop_box=crop_box,
                 )
                 if frame_detections:
                     _log_progress("4.5/6 Refining Gemini tracks across frames")
@@ -1098,6 +1138,8 @@ def run_pipeline(
     encode_preset: str = "medium",
     crf: int = 18,
     gemini_debug_json: Optional[Path] = None,
+    auto_crop_content: bool = False,
+    crop_padding: int = 0,
 ) -> None:
     """Run the full redaction pipeline."""
     input_path = Path(input_path)
@@ -1113,6 +1155,8 @@ def run_pipeline(
         raise ValueError("output_fps must be > 0")
     if crf < 0 or crf > 51:
         raise ValueError("crf must be between 0 and 51")
+    if crop_padding < 0:
+        raise ValueError("crop_padding must be >= 0")
 
     if _is_image(input_path):
         if not check_ffmpeg():
@@ -1160,6 +1204,8 @@ def run_pipeline(
             encode_preset=encode_preset,
             crf=crf,
             gemini_debug_json=gemini_debug_json,
+            auto_crop_content=auto_crop_content,
+            crop_padding=crop_padding,
         )
     else:
         raise ValueError(
