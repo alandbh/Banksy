@@ -14,6 +14,7 @@ from banksy_cli.pipeline import (
     _is_lower_input_text,
     _maybe_add_keyboard_region,
     _needs_gemini_fallback,
+    _normalize_mmss_event_timestamps_if_needed,
     _refine_event_tracks_with_template,
     _typing_sensitive,
     _select_evenly_spaced,
@@ -48,6 +49,32 @@ def test_events_cover_video_duration_detects_incomplete_timeline():
     assert _max_event_end_sec(events) == 0.56
     assert _events_cover_video_duration(events, duration_sec=72.0) is False
     assert _events_cover_video_duration(events, duration_sec=0.0) is True
+
+
+def test_normalize_mmss_event_timestamps_if_needed_converts_shorthand():
+    events = [
+        {"start_sec": 0.09, "end_sec": 0.17, "label": "input_field"},
+        {"start_sec": 1.26, "end_sec": 1.39, "label": "cpf"},
+        {"start_sec": 3.30, "end_sec": 3.34, "label": "cpf"},
+    ]
+    normalized, converted = _normalize_mmss_event_timestamps_if_needed(events, duration_sec=214.1)
+    assert converted is True
+    assert normalized[0]["start_sec"] == 9.0
+    assert normalized[0]["end_sec"] == 17.0
+    assert normalized[1]["start_sec"] == 86.0
+    assert normalized[1]["end_sec"] == 99.0
+    assert normalized[2]["start_sec"] == 210.0
+    assert normalized[2]["end_sec"] == 214.0
+
+
+def test_normalize_mmss_event_timestamps_if_needed_keeps_regular_seconds():
+    events = [
+        {"start_sec": 5.2, "end_sec": 7.8, "label": "cpf"},
+        {"start_sec": 21.0, "end_sec": 25.0, "label": "cpf"},
+    ]
+    normalized, converted = _normalize_mmss_event_timestamps_if_needed(events, duration_sec=214.1)
+    assert converted is False
+    assert normalized == events
 
 
 def test_select_evenly_spaced_keeps_budget_and_order():

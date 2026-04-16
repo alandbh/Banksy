@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import math
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from banksy_cli.config import (
     DETECTION_MAX_DIM,
@@ -251,11 +251,58 @@ def _events_cover_video_duration(events: list[dict], duration_sec: float) -> boo
     return True
 
 
+def _normalize_mmss_event_timestamps_if_needed(events: list[dict], duration_sec: float) -> tuple[list[dict], bool]:
+    """Convert MM.SS shorthand timestamps to absolute seconds when strongly indicated."""
+    if duration_sec < 60 or not events:
+        return events, False
+
+    raw_max_end = _max_event_end_sec(events)
+    # If Gemini already produced reasonable absolute seconds, keep as-is.
+    if raw_max_end <= 0 or raw_max_end > 10:
+        return events, False
+
+    converted: list[dict] = []
+    valid_count = 0
+    for event in events:
+        try:
+            start_raw = float(event.get("start_sec", 0.0))
+            end_raw = float(event.get("end_sec", start_raw))
+        except (TypeError, ValueError):
+            converted.append(dict(event))
+            continue
+
+        def _mmss_to_seconds(value: float) -> float:
+            minutes = int(max(0.0, value))
+            seconds_part = int(round((value - minutes) * 100))
+            seconds_part = max(0, min(59, seconds_part))
+            return float(minutes * 60 + seconds_part)
+
+        start_conv = _mmss_to_seconds(start_raw)
+        end_conv = _mmss_to_seconds(max(start_raw, end_raw))
+        item = dict(event)
+        item["start_sec"] = start_conv
+        item["end_sec"] = max(start_conv, end_conv)
+        converted.append(item)
+        valid_count += 1
+
+    if valid_count < max(1, int(len(events) * 0.8)):
+        return events, False
+
+    converted_max_end = _max_event_end_sec(converted)
+    # Accept only if converted timeline plausibly matches video length.
+    if converted_max_end < duration_sec * 0.60:
+        return events, False
+    if converted_max_end > duration_sec * 1.30:
+        return events, False
+    return converted, True
+
+
 def _sparse_low_contrast_text_fallback(
     frame_paths: list[Path],
     *,
     fps: float,
     keyboard: str,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> dict[int, list[dict]]:
     """Run sparse OCR with contrast enhancement as fallback for low-contrast UIs."""
     if not frame_paths:
@@ -265,7 +312,9 @@ def _sparse_low_contrast_text_fallback(
 
     sample_step = max(1, int(round(fps / 2.0)))  # about 2 FPS scan
     sampled_detections: dict[int, list[dict]] = {}
-    for frame_idx in range(0, len(frame_paths), sample_step):
+    scan_indices = list(range(0, len(frame_paths), sample_step))
+    total_scans = len(scan_indices)
+    for scan_pos, frame_idx in enumerate(scan_indices, start=1):
         img = load_image(frame_paths[frame_idx])
         regions = _detect_local_regions_with_retry(
             img,
@@ -275,6 +324,8 @@ def _sparse_low_contrast_text_fallback(
         filtered = [r for r in regions if str(r.get("label", "")).lower().strip() in TEXT_LIKE_LABELS]
         if filtered:
             sampled_detections[frame_idx] = filtered
+        if progress_cb is not None:
+            progress_cb(scan_pos, total_scans)
     if not sampled_detections:
         return {}
 
@@ -971,8 +1022,14 @@ def _process_video(
 
         # Build per-frame detections from Gemini events or interpolate local detections.
         if use_event_detections:
-            events_have_sensitive_text = _events_have_sensitive_text(events)
             duration_sec = float(info.get("duration", 0.0))
+            events, mmss_converted = _normalize_mmss_event_timestamps_if_needed(events, duration_sec)
+            if mmss_converted:
+                _log_progress(
+                    "Gemini timestamps looked like MM.SS shorthand; "
+                    "converted to absolute seconds before timeline checks."
+                )
+            events_have_sensitive_text = _events_have_sensitive_text(events)
             events_cover_duration = _events_cover_video_duration(events, duration_sec)
             max_event_end = _max_event_end_sec(events)
             if not events_cover_duration:
@@ -1002,10 +1059,17 @@ def _process_video(
                         "4.6/6 Running sparse low-contrast OCR fallback "
                         "(Gemini missed text or covered too little timeline)"
                     )
+                    fallback_last_pct = -1
+
+                    def _fallback_progress(done: int, total: int) -> None:
+                        nonlocal fallback_last_pct
+                        fallback_last_pct = _maybe_log_counter("Fallback OCR scan", done, total, fallback_last_pct, step_pct=20)
+
                     fallback = _sparse_low_contrast_text_fallback(
                         all_frame_paths,
                         fps=fps,
                         keyboard=keyboard,
+                        progress_cb=_fallback_progress,
                     )
                     if fallback:
                         merged_frames = 0
